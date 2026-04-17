@@ -246,15 +246,21 @@ GOOGLE_NS_V6="2001:4860:4860::8888 2606:4700:4700::1111"
 echo -ne "\n${aoiBlue}DNS configuration${plain}\n"
 read -p "Use current system DNS? y/n [Default n -> Google]: " useDefaultDNS
 
-# Helper to collect current resolv.conf nameservers and filter out link-local IPv6
+# Helper to collect current resolv.conf nameservers
 collect_dns() {
     awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null | awk 'NF {print $1}'
 }
 
 if [[ "$useDefaultDNS" =~ ^[Yy]$ ]]; then
     DNS_ALL=$(collect_dns)
-    # Filter out link-local IPv6 (fe80::/10) and empty lines
-    DNS_ALL=$(echo "$DNS_ALL" | awk 'NF && $1 !~ /^fe8[0-9a-f]:/ && $1 !~ /^fe9[0-9a-f]:/ && $1 !~ /^fea[0-9a-f]:/ && $1 !~ /^feb[0-9a-f]:/')
+    # Filter out stub/loopback DNS and link-local IPv6 values that will not work in the installed system.
+    DNS_ALL=$(echo "$DNS_ALL" | awk '{
+        ns=tolower($1)
+        if (ns == "" || ns !~ /^[0-9a-f:.]+$/) next
+        if (ns ~ /^127\./ || ns == "0.0.0.0" || ns == "::1") next
+        if (ns ~ /^fe[89ab][0-9a-f]:/) next
+        print $1
+    }')
     # Split into families
     NS_V4=$(echo "$DNS_ALL" | awk 'index($1, ":")==0' | xargs)
     NS_V6=$(echo "$DNS_ALL" | awk 'index($1, ":")>0' | xargs)
@@ -272,6 +278,10 @@ NAMESERVERS="$(echo $NS_V4 $NS_V6 | xargs)"
 if [ -z "$NAMESERVERS" ]; then
     NAMESERVERS="$GOOGLE_NS_V4 $GOOGLE_NS_V6"
 fi
+RESOLVCONF_PRINTF_ARGS=""
+for ns in $NAMESERVERS; do
+    RESOLVCONF_PRINTF_ARGS="$RESOLVCONF_PRINTF_ARGS 'nameserver ${ns}'"
+done
 
 echo -en "\n${aoiBlue}Download boot file...${plain}\n"
 wget -q -O linux "https://ftp.debian.org/debian/dists/$debian_version/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux" || { echo "Error: failed to download netboot kernel (linux)." >&2; exit 1; }
@@ -393,7 +403,7 @@ ${BBR} \
  ${IFUPDOWN_IPV6_GATEWAY_LINE} \
  ${IFUPDOWN_IPV6_LINKLOCAL_ROUTE_LINES} \
  > /etc/network/interfaces"; \
- in-target /bin/sh -c "rm -f /etc/resolv.conf; : > /etc/resolv.conf; for ns in ${NAMESERVERS}; do printf 'nameserver %s\n' \"\$ns\" >> /etc/resolv.conf; done"; \
+ in-target /bin/sh -c "rm -f /etc/resolv.conf; printf '%s\n' ${RESOLVCONF_PRINTF_ARGS} > /etc/resolv.conf; chmod 644 /etc/resolv.conf"; \
  in-target systemctl disable systemd-networkd.service systemd-resolved.service 2>/dev/null || true;
 ### Shutdown machine
 d-i finish-install/reboot_in_progress note
